@@ -1,0 +1,107 @@
+-- SCD2.sql — build history (Type 2) from stream of changes on CUSTOMER
+USE DATABASE SCD_DEMO;
+USE SCHEMA   SCD2;
+
+-- Ensure the stream exists on CUSTOMER (if not already created earlier)
+-- CREATE OR REPLACE STREAM SCD_DEMO.SCD2.CUSTOMER_TABLE_CHANGES ON TABLE SCD_DEMO.SCD2.CUSTOMER;
+
+-- View that translates stream records (INSERT/UPDATE/DELETE) into rows
+-- we should apply to CUSTOMER_HISTORY
+CREATE OR REPLACE VIEW SCD_DEMO.SCD2.V_CUSTOMER_CHANGE_DATA AS
+/* INSERTs that are NOT part of an update (brand new rows) -> one 'I' record */
+SELECT
+  CUSTOMER_ID, FIRST_NAME, LAST_NAME, EMAIL, STREET, CITY, STATE, COUNTRY,
+  UPDATE_TIMESTAMP                                 AS START_TIME,
+  '9999-12-31'::TIMESTAMP_NTZ                      AS END_TIME,
+  TRUE                                             AS IS_CURRENT,
+  'I'                                              AS DML_TYPE
+FROM SCD_DEMO.SCD2.CUSTOMER_TABLE_CHANGES
+WHERE METADATA$ACTION = 'INSERT' AND METADATA$ISUPDATE = 'FALSE'
+
+UNION ALL
+
+/* UPDATEs -> produce:
+   - an 'I' record for the new current version
+   - a 'U' record marking the prior version as not current (by START_TIME) */
+SELECT
+  CUSTOMER_ID, FIRST_NAME, LAST_NAME, EMAIL, STREET, CITY, STATE, COUNTRY,
+  UPDATE_TIMESTAMP                                 AS START_TIME,
+  '9999-12-31'::TIMESTAMP_NTZ                      AS END_TIME,
+  TRUE                                             AS IS_CURRENT,
+  'I'                                              AS DML_TYPE
+FROM SCD_DEMO.SCD2.CUSTOMER_TABLE_CHANGES
+WHERE METADATA$ACTION = 'INSERT' AND METADATA$ISUPDATE = 'TRUE'
+
+UNION ALL
+
+SELECT
+  ch.CUSTOMER_ID,
+  NULL AS FIRST_NAME, NULL AS LAST_NAME, NULL AS EMAIL, NULL AS STREET, NULL AS CITY, NULL AS STATE, NULL AS COUNTRY,
+  ch.START_TIME,
+  ctc.UPDATE_TIMESTAMP                             AS END_TIME,
+  FALSE                                            AS IS_CURRENT,
+  'U'                                              AS DML_TYPE
+FROM SCD_DEMO.SCD2.CUSTOMER_HISTORY ch
+JOIN (
+  SELECT DISTINCT CUSTOMER_ID, UPDATE_TIMESTAMP
+  FROM SCD_DEMO.SCD2.CUSTOMER_TABLE_CHANGES
+  WHERE METADATA$ACTION = 'DELETE' AND METADATA$ISUPDATE = 'TRUE'
+) ctc
+  ON ch.CUSTOMER_ID = ctc.CUSTOMER_ID
+WHERE ch.IS_CURRENT = TRUE
+
+UNION ALL
+
+/* DELETEs (not update deletes) -> close the current record */
+SELECT
+  ch.CUSTOMER_ID,
+  NULL AS FIRST_NAME, NULL AS LAST_NAME, NULL AS EMAIL, NULL AS STREET, NULL AS CITY, NULL AS STATE, NULL AS COUNTRY,
+  ch.START_TIME,
+  CURRENT_TIMESTAMP()::TIMESTAMP_NTZ               AS END_TIME,
+  NULL                                             AS IS_CURRENT,
+  'D'                                              AS DML_TYPE
+FROM SCD_DEMO.SCD2.CUSTOMER_HISTORY ch
+JOIN SCD_DEMO.SCD2.CUSTOMER_TABLE_CHANGES ctc
+  ON ch.CUSTOMER_ID = ctc.CUSTOMER_ID
+WHERE ctc.METADATA$ACTION = 'DELETE'
+  AND ctc.METADATA$ISUPDATE = 'FALSE'
+  AND ch.IS_CURRENT = TRUE
+;
+
+-- Task: apply the change view into CUSTOMER_HISTORY
+-- Run AFTER the raw->SCD1 task to avoid races
+CREATE OR REPLACE TASK SCD_DEMO.SCD2.TSK_SCD_HIST
+  WAREHOUSE = COMPUTE_WH
+  AFTER SCD_DEMO.SCD2.TSK_SCD_RAW
+AS
+  MERGE INTO SCD_DEMO.SCD2.CUSTOMER_HISTORY AS ch
+  USING SCD_DEMO.SCD2.V_CUSTOMER_CHANGE_DATA AS ccd
+    ON ch.CUSTOMER_ID = ccd.CUSTOMER_ID
+   AND ch.START_TIME  = ccd.START_TIME
+  WHEN MATCHED AND ccd.DML_TYPE = 'U' THEN
+    UPDATE SET
+      END_TIME  = ccd.END_TIME,
+      IS_CURRENT = FALSE
+  WHEN MATCHED AND ccd.DML_TYPE = 'D' THEN
+    UPDATE SET
+      END_TIME  = ccd.END_TIME,
+      IS_CURRENT = FALSE
+  WHEN NOT MATCHED AND ccd.DML_TYPE = 'I' THEN
+    INSERT (CUSTOMER_ID, FIRST_NAME, LAST_NAME, EMAIL, STREET, CITY, STATE, COUNTRY,
+            START_TIME, END_TIME, IS_CURRENT)
+    VALUES (ccd.CUSTOMER_ID, ccd.FIRST_NAME, ccd.LAST_NAME, ccd.EMAIL, ccd.STREET,
+            ccd.CITY, ccd.STATE, ccd.COUNTRY, ccd.START_TIME, ccd.END_TIME, ccd.IS_CURRENT);
+
+-- Enable the history task
+ALTER TASK SCD_DEMO.SCD2.TSK_SCD_HIST RESUME;
+
+-- Optional checks:
+-- SHOW TASKS IN SCHEMA SCD_DEMO.SCD2;
+-- SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+--   WHERE NAME IN ('SCD_DEMO.SCD2.TSK_SCD_RAW','SCD_DEMO.SCD2.TSK_SCD_HIST')
+--   ORDER BY SCHEDULED_TIME DESC;
+
+-- Optional quick tests (manual changes):
+-- INSERT INTO SCD_DEMO.SCD2.CUSTOMER VALUES (223136,'Jessica','Arnold','tanner39@smith.com','595 Benjamin Forge Suite 124','Michaelstad','Connecticut','Cape Verde',CURRENT_TIMESTAMP());
+-- UPDATE SCD_DEMO.SCD2.CUSTOMER SET FIRST_NAME='Jessica', UPDATE_TIMESTAMP=CURRENT_TIMESTAMP() WHERE CUSTOMER_ID=72;
+-- DELETE FROM SCD_DEMO.SCD2.CUSTOMER WHERE CUSTOMER_ID=73;
