@@ -1,22 +1,25 @@
-# Real-Time Streaming: NiFi → S3 → Snowflake
+# Real-Time Data Streaming: EC2 → NiFi → S3 → Snowflake
 
 **What this is:** a small, end-to-end real-time pipeline.  
-Python creates customer records → **Apache NiFi** uploads CSVs to **Amazon S3** → **Snowflake Snowpipe** auto-loads to a RAW table → **Streams** and **Tasks** keep **SCD1 (current)** and **SCD2 (history)** tables up to date.
+Python (Jupyter in Docker on EC2) generates customer records as CSVs → **Apache NiFi** (in Docker on EC2) picks them up and pushes the CSVs to **Amazon S3** → **Snowflake Snowpipe** auto-loads to a RAW table → **Streams** and **Tasks** keep **SCD1 (current)** and **SCD2 (history)** tables up to date.  
 
 By the end you have three tables:
 - `CUSTOMER_RAW` — landing/ingest
 - `CUSTOMER` — SCD1 (latest values)
 - `CUSTOMER_HISTORY` — SCD2 (full history with start/end times)
 
-![Architecture](architecture.png)
+---
+## Architecture Overview
+![Architecture](Data%20Architecture.png)
 
 ---
 
 ## What I learnt through this project
-- Move files to S3 with **NiFi** (`ListFile → FetchFile → PutS3Object`)
-- Auto-ingest files to Snowflake with **Snowpipe**
-- Maintain **SCD Type 1** (current) and **SCD Type 2** (history) with **Streams** and **Tasks**
-- Use practical SQL patterns (null-safe `MERGE`, task dependencies)
+- Run NiFi + Jupyter in Docker **on Amazon EC2**.
+- Move files to S3 with **NiFi** (ListFile → FetchFile → PutS3Object).
+- Auto-ingest files to Snowflake with **Snowpipe**.
+- Maintain **SCD Type 1** (current) and **SCD Type 2** (history) with **Streams** and **Tasks**.
+- Use practical SQL patterns (null-safe `MERGE`, task dependencies).
 
 ---
 
@@ -27,16 +30,7 @@ By the end you have three tables:
 - `s3-snowflake_integration.sql` — Storage Integration, Stage, and Snowpipe
 - `SCD1.sql` — procedure + Task for SCD1 upsert (`CUSTOMER_RAW → CUSTOMER`)
 - `SCD2.sql` — view + Task for SCD2 (`CUSTOMER → CUSTOMER_HISTORY`)
-- `architecture.png` — high-level diagram
-
----
-
-## Prerequisites
-- Docker Desktop (or Docker on EC2)
-- An S3 bucket (e.g., `s3://<BUCKET>/stream_data/`)
-- Snowflake account + role that can create DB/Schema/Tables/Tasks
-- IAM role for Snowflake **Storage Integration** (trust set up to Snowflake)
-- (Optional) S3 → SNS/SQS wired to your Snowpipe **notification channel** for auto-ingest
+- `Data Architecture.png` — high-level diagram
 
 ---
 
@@ -101,13 +95,16 @@ You should see files appear in `s3://<YOUR_BUCKET>/stream_data/`.
 
 This project uses a **Stream** on `CUSTOMER` to detect inserts/updates/deletes, then a **Task** merges those into `CUSTOMER_HISTORY`.
 
-### Validate the flow
+---
+
+## Validate the flow
 
 - Files land in S3 under `stream_data/`
 - `CUSTOMER_RAW` fills via Snowpipe
 - After the SCD1 task runs, `CUSTOMER` shows the latest values
 - After the SCD2 task runs, `CUSTOMER_HISTORY` records inserts/changes/deletes
 
-### Contact
+---
+## Contact
 
 If you’re also exploring data engineering or cloud projects — I’d love to connect!
